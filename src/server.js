@@ -10,27 +10,62 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const AUTH_TOKEN = process.env.AUTH_TOKEN || 'changeme';
 
+console.log('🚀 Server starting...');
+console.log('PORT:', PORT);
+console.log('AUTH_TOKEN configured:', AUTH_TOKEN !== 'changeme' ? 'YES (custom)' : 'NO (using default)');
+
 // Data storage file
 const dataDir = path.join(__dirname, '../data');
 const dbFile = path.join(dataDir, 'requests.json');
 
 // Ensure data directory exists
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
+try {
+  if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true });
+    console.log('✓ Data directory created:', dataDir);
+  }
+} catch (err) {
+  console.error('❌ Error creating data directory:', err.message);
 }
 
 // Initialize database file if it doesn't exist
-if (!fs.existsSync(dbFile)) {
-  fs.writeFileSync(dbFile, JSON.stringify({ requests: [] }, null, 2));
+try {
+  if (!fs.existsSync(dbFile)) {
+    fs.writeFileSync(dbFile, JSON.stringify({ requests: [] }, null, 2));
+    console.log('✓ Database file initialized:', dbFile);
+  }
+} catch (err) {
+  console.error('❌ Error initializing database:', err.message);
 }
 
-// Middleware
+// Middleware - Order matters!
 app.use(helmet());
 app.use(morgan('combined'));
+
+// Body parsing middleware with proper error handling
+app.use((req, res, next) => {
+  let data = '';
+  
+  req.on('data', chunk => {
+    data += chunk.toString();
+    if (data.length > 10485760) { // 10MB limit
+      req.destroy();
+    }
+  });
+
+  req.on('end', () => {
+    req.rawBody = data;
+    next();
+  });
+
+  req.on('error', (err) => {
+    console.error('❌ Request error:', err.message);
+    next(err);
+  });
+});
+
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
-app.use(express.text({ limit: '10mb' }));
-app.use(express.raw({ limit: '10mb' }));
 
 // Load requests from file
 function loadRequests() {
@@ -38,7 +73,7 @@ function loadRequests() {
     const data = fs.readFileSync(dbFile, 'utf8');
     return JSON.parse(data).requests || [];
   } catch (err) {
-    console.error('Error loading requests:', err);
+    console.error('❌ Error loading requests:', err.message);
     return [];
   }
 }
@@ -48,7 +83,7 @@ function saveRequests(requests) {
   try {
     fs.writeFileSync(dbFile, JSON.stringify({ requests }, null, 2));
   } catch (err) {
-    console.error('Error saving requests:', err);
+    console.error('❌ Error saving requests:', err.message);
   }
 }
 
@@ -58,15 +93,23 @@ function verifyToken(req) {
   return token === AUTH_TOKEN;
 }
 
-// Health check
+// Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+  console.log('✓ Health check request');
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString(),
+    port: PORT,
+    requests: loadRequests().length
+  });
 });
 
 // Dashboard
 app.get('/dashboard', (req, res) => {
+  console.log('📊 Dashboard request');
+  
   if (!verifyToken(req)) {
-    return res.status(401).send('Unauthorized. Use ?token=YOUR_TOKEN');
+    return res.status(401).send('❌ Unauthorized. Use ?token=YOUR_TOKEN');
   }
 
   const requests = loadRequests();
@@ -258,31 +301,31 @@ app.get('/dashboard', (req, res) => {
               <div class="meta-item"><span class="meta-label">IP:</span> ${req.ip}</div>
               <div class="meta-item"><span class="meta-label">ID:</span> ${req.id}</div>
             </div>
-            ${req.userAgent ? `<div class="meta"><div class="meta-label">User-Agent:</div> ${req.userAgent}</div>` : ''}
-            ${req.body ? `<div class="body">${escapeHtml(req.body.substring(0, 500))}${req.body.length > 500 ? '...' : ''}</div>` : ''}
+            ${req.userAgent ? \`<div class="meta"><div class="meta-label">User-Agent:</div> \${escapeHtml(req.userAgent)}</div>\` : ''}
+            ${req.body ? \`<div class="body">\${escapeHtml(req.body.substring(0, 500))}\${req.body.length > 500 ? '...' : ''}</div>\` : ''}
           </div>
-        `).join('')}
+        \`).join('')}
       `}
     </div>
   </div>
 
   <script>
+    function escapeHtml(text) {
+      const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
+      return text.replace(/[&<>"']/g, m => map[m]);
+    }
+
     function refreshPage() {
       location.reload();
     }
     
     function clearAll() {
       if (confirm('Are you sure? This will delete all logged requests.')) {
-        fetch('/api/requests?token=${req.query.token || AUTH_TOKEN}', {
+        fetch('/api/requests?token=${AUTH_TOKEN}', {
           method: 'DELETE',
-          headers: { 'x-auth-token': '${req.query.token || AUTH_TOKEN}' }
+          headers: { 'x-auth-token': '${AUTH_TOKEN}' }
         }).then(() => refreshPage());
       }
-    }
-
-    function escapeHtml(text) {
-      const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-      return text.replace(/[&<>"']/g, m => map[m]);
     }
 
     // Auto-refresh every 5 seconds
@@ -366,49 +409,63 @@ app.get('/api/export', (req, res) => {
 
 // Catch-all endpoint - log all SSRF callbacks
 app.all('*', (req, res) => {
-  // Extract IP address (with X-Forwarded-For support for proxies)
-  const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() ||
-             req.headers['x-real-ip'] ||
-             req.socket.remoteAddress ||
-             'unknown';
+  try {
+    // Extract IP address (with X-Forwarded-For support for proxies)
+    const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() ||
+               req.headers['x-real-ip'] ||
+               req.socket.remoteAddress ||
+               'unknown';
 
-  // Build body from different content types
-  let body = '';
-  if (req.body) {
-    if (typeof req.body === 'string') {
-      body = req.body;
-    } else if (Buffer.isBuffer(req.body)) {
-      body = req.body.toString();
-    } else {
-      body = JSON.stringify(req.body);
+    // Use raw body if available, otherwise try parsed body
+    let body = req.rawBody || '';
+    if (!body && req.body) {
+      if (typeof req.body === 'string') {
+        body = req.body;
+      } else if (Buffer.isBuffer(req.body)) {
+        body = req.body.toString();
+      } else {
+        body = JSON.stringify(req.body);
+      }
     }
+
+    // Log the request
+    const newRequest = {
+      id: uuidv4(),
+      timestamp: new Date().toISOString(),
+      method: req.method,
+      path: req.path,
+      query: Object.keys(req.query).length > 0 ? new URLSearchParams(req.query).toString() : '',
+      ip,
+      userAgent: req.get('user-agent') || '',
+      headers: req.headers,
+      body: body.substring(0, 2000),
+      bodySize: body.length,
+    };
+
+    const requests = loadRequests();
+    requests.push(newRequest);
+    saveRequests(requests);
+
+    console.log(`✓ [${newRequest.timestamp}] ${req.method} ${req.path} from ${ip}`);
+
+    // Respond with JSON
+    res.json({
+      received: true,
+      id: newRequest.id,
+      timestamp: newRequest.timestamp
+    });
+  } catch (err) {
+    console.error('❌ Error processing request:', err.message);
+    res.status(500).json({ error: 'Server error', message: err.message });
   }
+});
 
-  // Log the request
-  const newRequest = {
-    id: uuidv4(),
-    timestamp: new Date().toISOString(),
-    method: req.method,
-    path: req.path,
-    query: Object.keys(req.query).length > 0 ? new URLSearchParams(req.query).toString() : '',
-    ip,
-    userAgent: req.get('user-agent') || '',
-    headers: req.headers,
-    body: body.substring(0, 2000),
-    bodySize: body.length,
-  };
-
-  const requests = loadRequests();
-  requests.push(newRequest);
-  saveRequests(requests);
-
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} from ${ip}`);
-
-  // Respond with JSON
-  res.json({
-    received: true,
-    id: newRequest.id,
-    timestamp: newRequest.timestamp
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error('❌ Unhandled error:', err);
+  res.status(500).json({ 
+    error: 'Internal server error', 
+    message: err.message 
   });
 });
 
@@ -416,14 +473,33 @@ app.all('*', (req, res) => {
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n✅ SSRF Listener running on http://0.0.0.0:${PORT}`);
   console.log(`📊 Dashboard: http://localhost:${PORT}/dashboard?token=${AUTH_TOKEN}`);
-  console.log(`🏥 Health: http://localhost:${PORT}/health\n`);
+  console.log(`🏥 Health: http://localhost:${PORT}/health`);
+  console.log(`🎯 Listening for SSRF callbacks...\n`);
+});
+
+server.on('error', (err) => {
+  console.error('❌ Server error:', err);
+  process.exit(1);
 });
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down...');
+  console.log('\n📴 SIGTERM received, shutting down gracefully...');
   server.close(() => {
-    console.log('Server closed');
+    console.log('✓ Server closed');
     process.exit(0);
   });
+});
+
+process.on('SIGINT', () => {
+  console.log('\n📴 SIGINT received, shutting down gracefully...');
+  server.close(() => {
+    console.log('✓ Server closed');
+    process.exit(0);
+  });
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('❌ Uncaught exception:', err);
+  process.exit(1);
 });
