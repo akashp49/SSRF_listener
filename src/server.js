@@ -1,3 +1,7 @@
+#!/usr/bin/env node
+
+console.log('🚀 Starting SSRF Listener...');
+
 require('dotenv').config();
 const express = require('express');
 const helmet = require('helmet');
@@ -10,11 +14,11 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const AUTH_TOKEN = process.env.AUTH_TOKEN || 'changeme';
 
-console.log('🚀 Server starting...');
-console.log('PORT:', PORT);
-console.log('AUTH_TOKEN configured:', AUTH_TOKEN !== 'changeme' ? 'YES (custom)' : 'NO (using default)');
+console.log('📋 Configuration:');
+console.log('   PORT:', PORT);
+console.log('   AUTH_TOKEN:', AUTH_TOKEN === 'changeme' ? '(default)' : '(custom)');
 
-// Data storage file
+// Data storage
 const dataDir = path.join(__dirname, '../data');
 const dbFile = path.join(dataDir, 'requests.json');
 
@@ -22,33 +26,27 @@ const dbFile = path.join(dataDir, 'requests.json');
 try {
   if (!fs.existsSync(dataDir)) {
     fs.mkdirSync(dataDir, { recursive: true });
-    console.log('✓ Data directory created:', dataDir);
   }
-} catch (err) {
-  console.error('❌ Error creating data directory:', err.message);
-}
-
-// Initialize database file if it doesn't exist
-try {
   if (!fs.existsSync(dbFile)) {
     fs.writeFileSync(dbFile, JSON.stringify({ requests: [] }, null, 2));
-    console.log('✓ Database file initialized:', dbFile);
   }
+  console.log('✓ Data directory ready:', dataDir);
 } catch (err) {
-  console.error('❌ Error initializing database:', err.message);
+  console.error('❌ Error setting up data directory:', err.message);
+  process.exit(1);
 }
 
-// Middleware - Order matters!
+// Middleware
 app.use(helmet());
 app.use(morgan('combined'));
 
-// Body parsing middleware with proper error handling
+// Parse incoming data
 app.use((req, res, next) => {
   let data = '';
   
   req.on('data', chunk => {
-    data += chunk.toString();
-    if (data.length > 10485760) { // 10MB limit
+    data += chunk;
+    if (data.length > 10485760) {
       req.destroy();
     }
   });
@@ -59,376 +57,142 @@ app.use((req, res, next) => {
   });
 
   req.on('error', (err) => {
-    console.error('❌ Request error:', err.message);
-    next(err);
+    console.error('Request error:', err.message);
+    res.status(400).json({ error: 'Bad request' });
   });
 });
 
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ limit: '10mb', extended: true }));
-
-// Load requests from file
+// Load/save data
 function loadRequests() {
   try {
     const data = fs.readFileSync(dbFile, 'utf8');
-    return JSON.parse(data).requests || [];
+    const parsed = JSON.parse(data);
+    return Array.isArray(parsed.requests) ? parsed.requests : [];
   } catch (err) {
-    console.error('❌ Error loading requests:', err.message);
+    console.error('Error loading requests:', err.message);
     return [];
   }
 }
 
-// Save requests to file
 function saveRequests(requests) {
   try {
     fs.writeFileSync(dbFile, JSON.stringify({ requests }, null, 2));
   } catch (err) {
-    console.error('❌ Error saving requests:', err.message);
+    console.error('Error saving requests:', err.message);
   }
 }
 
-// Verify auth token
 function verifyToken(req) {
-  const token = req.query.token || req.headers['x-auth-token'] || req.headers['authorization']?.replace('Bearer ', '');
+  const token = req.query.token || req.headers['x-auth-token'];
   return token === AUTH_TOKEN;
 }
 
-// Health check endpoint
+// Health endpoint
 app.get('/health', (req, res) => {
-  console.log('✓ Health check request');
   res.json({ 
-    status: 'healthy', 
-    timestamp: new Date().toISOString(),
-    port: PORT,
-    requests: loadRequests().length
+    status: 'ok', 
+    timestamp: new Date().toISOString()
   });
 });
 
 // Dashboard
 app.get('/dashboard', (req, res) => {
-  console.log('📊 Dashboard request');
-  
   if (!verifyToken(req)) {
-    return res.status(401).send('❌ Unauthorized. Use ?token=YOUR_TOKEN');
+    return res.status(401).send('Unauthorized. Use ?token=' + AUTH_TOKEN);
   }
 
   const requests = loadRequests();
-  const html = `
-<!DOCTYPE html>
-<html lang="en">
+  
+  res.send(`<!DOCTYPE html>
+<html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SSRF Listener Dashboard</title>
+  <title>SSRF Listener</title>
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      min-height: 100vh;
-      padding: 20px;
-    }
-    .container {
-      max-width: 1200px;
-      margin: 0 auto;
-      background: white;
-      border-radius: 10px;
-      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
-      overflow: hidden;
-    }
-    .header {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      color: white;
-      padding: 30px;
-      text-align: center;
-    }
-    .header h1 { font-size: 2.5em; margin-bottom: 5px; }
-    .header p { font-size: 0.9em; opacity: 0.9; }
-    .controls {
-      padding: 20px 30px;
-      border-bottom: 1px solid #eee;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 10px;
-    }
-    .controls button {
-      padding: 10px 20px;
-      border: none;
-      border-radius: 5px;
-      background: #667eea;
-      color: white;
-      cursor: pointer;
-      font-size: 0.9em;
-      transition: background 0.3s;
-    }
-    .controls button:hover { background: #764ba2; }
-    .controls button.danger {
-      background: #e74c3c;
-    }
-    .controls button.danger:hover {
-      background: #c0392b;
-    }
-    .stats {
-      display: flex;
-      gap: 15px;
-      font-size: 0.9em;
-    }
-    .stat {
-      padding: 10px 15px;
-      background: #f5f5f5;
-      border-radius: 5px;
-    }
-    .stat strong { color: #667eea; }
-    .content {
-      padding: 30px;
-      max-height: 70vh;
-      overflow-y: auto;
-    }
-    .empty {
-      text-align: center;
-      color: #999;
-      padding: 60px 20px;
-    }
-    .empty svg {
-      width: 100px;
-      height: 100px;
-      margin-bottom: 20px;
-      opacity: 0.3;
-    }
-    .request-item {
-      border: 1px solid #eee;
-      border-radius: 8px;
-      padding: 15px;
-      margin-bottom: 15px;
-      background: #f9f9f9;
-      transition: all 0.2s;
-    }
-    .request-item:hover {
-      background: #f0f0f0;
-      border-color: #667eea;
-    }
-    .request-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: start;
-      margin-bottom: 10px;
-    }
-    .method {
-      display: inline-block;
-      padding: 4px 10px;
-      border-radius: 3px;
-      font-weight: bold;
-      font-size: 0.85em;
-      color: white;
-    }
-    .method.GET { background: #3498db; }
-    .method.POST { background: #2ecc71; }
-    .method.PUT { background: #f39c12; }
-    .method.DELETE { background: #e74c3c; }
-    .method.HEAD { background: #95a5a6; }
-    .method.OPTIONS { background: #9b59b6; }
-    .path {
-      font-family: 'Courier New', monospace;
-      font-size: 0.9em;
-      margin: 8px 0;
-      word-break: break-all;
-      color: #333;
-    }
-    .meta {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      gap: 10px;
-      font-size: 0.85em;
-      color: #666;
-      margin: 10px 0;
-    }
-    .meta-item { display: flex; gap: 5px; }
-    .meta-label { font-weight: bold; color: #333; }
-    .body {
-      background: #f5f5f5;
-      padding: 10px;
-      border-radius: 4px;
-      font-family: 'Courier New', monospace;
-      font-size: 0.85em;
-      max-height: 200px;
-      overflow-y: auto;
-      white-space: pre-wrap;
-      word-break: break-all;
-      margin-top: 10px;
-    }
-    .timestamp { font-size: 0.8em; color: #999; }
+    body { font-family: sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+    .container { max-width: 1200px; margin: 0 auto; background: white; border-radius: 8px; padding: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+    h1 { color: #333; margin-top: 0; }
+    .stats { display: flex; gap: 20px; margin: 20px 0; }
+    .stat { background: #f0f0f0; padding: 15px; border-radius: 5px; }
+    button { padding: 10px 15px; background: #667eea; color: white; border: none; border-radius: 5px; cursor: pointer; }
+    button:hover { background: #764ba2; }
+    button.danger { background: #e74c3c; }
+    button.danger:hover { background: #c0392b; }
+    .request { border: 1px solid #ddd; padding: 15px; margin: 10px 0; border-radius: 5px; }
+    .method { display: inline-block; padding: 3px 8px; background: #3498db; color: white; border-radius: 3px; margin-right: 10px; font-weight: bold; }
+    .path { font-family: monospace; margin: 5px 0; }
+    .meta { font-size: 0.9em; color: #666; margin-top: 10px; }
+    .empty { text-align: center; color: #999; padding: 40px; }
   </style>
 </head>
 <body>
   <div class="container">
-    <div class="header">
-      <h1>🎯 SSRF Listener</h1>
-      <p>Penetration Testing Callback Server</p>
+    <h1>🎯 SSRF Listener</h1>
+    <div class="stats">
+      <div class="stat">Total Hits: <strong>${requests.length}</strong></div>
     </div>
-
-    <div class="controls">
-      <div class="stats">
-        <div class="stat">Total Hits: <strong>${requests.length}</strong></div>
-      </div>
-      <div>
-        <button onclick="refreshPage()">🔄 Refresh</button>
-        <button class="danger" onclick="clearAll()">🗑️ Clear All</button>
-      </div>
+    <div>
+      <button onclick="location.reload()">🔄 Refresh</button>
+      <button class="danger" onclick="clearAll()">🗑️ Clear All</button>
     </div>
-
-    <div class="content">
-      ${requests.length === 0 ? `
-        <div class="empty">
-          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path>
-          </svg>
-          <h3>No SSRF hits yet</h3>
-          <p>Waiting for callbacks...</p>
-        </div>
-      ` : `
-        ${requests.reverse().map(req => `
-          <div class="request-item">
-            <div class="request-header">
-              <div>
-                <span class="method ${req.method}">${req.method}</span>
-              </div>
-              <span class="timestamp">${new Date(req.timestamp).toLocaleString()}</span>
-            </div>
-            <div class="path">${req.path}${req.query ? '?' + req.query : ''}</div>
-            <div class="meta">
-              <div class="meta-item"><span class="meta-label">IP:</span> ${req.ip}</div>
-              <div class="meta-item"><span class="meta-label">ID:</span> ${req.id}</div>
-            </div>
-            ${req.userAgent ? \`<div class="meta"><div class="meta-label">User-Agent:</div> \${escapeHtml(req.userAgent)}</div>\` : ''}
-            ${req.body ? \`<div class="body">\${escapeHtml(req.body.substring(0, 500))}\${req.body.length > 500 ? '...' : ''}</div>\` : ''}
+    
+    <div id="requests">
+      ${requests.length === 0 ? '<div class="empty">No SSRF hits yet. Waiting for callbacks...</div>' : requests.reverse().map(r => `
+        <div class="request">
+          <div><span class="method">${r.method}</span><span class="path">${r.path}${r.query ? '?' + r.query : ''}</span></div>
+          <div class="meta">
+            <div>IP: ${r.ip}</div>
+            <div>ID: ${r.id}</div>
+            <div>Time: ${new Date(r.timestamp).toLocaleString()}</div>
+            ${r.userAgent ? '<div>User-Agent: ' + r.userAgent + '</div>' : ''}
+            ${r.body ? '<div style="margin-top: 10px; background: #f9f9f9; padding: 10px; border-radius: 3px; max-height: 200px; overflow-y: auto; font-family: monospace; font-size: 0.85em;">' + r.body.substring(0, 500) + (r.body.length > 500 ? '...' : '') + '</div>' : ''}
           </div>
-        \`).join('')}
-      `}
+        </div>
+      `).join('')}
     </div>
   </div>
 
   <script>
-    function escapeHtml(text) {
-      const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-      return text.replace(/[&<>"']/g, m => map[m]);
-    }
-
-    function refreshPage() {
-      location.reload();
-    }
-    
     function clearAll() {
-      if (confirm('Are you sure? This will delete all logged requests.')) {
-        fetch('/api/requests?token=${AUTH_TOKEN}', {
-          method: 'DELETE',
-          headers: { 'x-auth-token': '${AUTH_TOKEN}' }
-        }).then(() => refreshPage());
+      if (confirm('Delete all requests?')) {
+        fetch('/api/requests?token=${AUTH_TOKEN}', { method: 'DELETE', headers: { 'x-auth-token': '${AUTH_TOKEN}' } })
+          .then(() => location.reload());
       }
     }
-
-    // Auto-refresh every 5 seconds
-    setInterval(refreshPage, 5000);
+    setInterval(() => location.reload(), 5000);
   </script>
 </body>
-</html>
-  `;
-
-  res.send(html);
+</html>`);
 });
 
-// API: Get all requests
+// API endpoints
 app.get('/api/requests', (req, res) => {
-  if (!verifyToken(req)) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
-  let requests = loadRequests();
-  const search = req.query.search?.toLowerCase();
-
-  if (search) {
-    requests = requests.filter(r =>
-      r.path.toLowerCase().includes(search) ||
-      r.ip.includes(search) ||
-      r.userAgent?.toLowerCase().includes(search) ||
-      r.body?.toLowerCase().includes(search)
-    );
-  }
-
-  // Pagination
-  const page = parseInt(req.query.page) || 1;
-  const limit = parseInt(req.query.limit) || 50;
-  const start = (page - 1) * limit;
-  const paginated = requests.slice(start, start + limit);
-
-  res.json({
-    total: requests.length,
-    page,
-    limit,
-    data: paginated
-  });
+  if (!verifyToken(req)) return res.status(401).json({ error: 'Unauthorized' });
+  res.json({ data: loadRequests() });
 });
 
-// API: Get single request
-app.get('/api/requests/:id', (req, res) => {
-  if (!verifyToken(req)) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
-  const requests = loadRequests();
-  const request = requests.find(r => r.id === req.params.id);
-
-  if (!request) {
-    return res.status(404).json({ error: 'Request not found' });
-  }
-
-  res.json(request);
-});
-
-// API: Clear all requests
 app.delete('/api/requests', (req, res) => {
-  if (!verifyToken(req)) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
+  if (!verifyToken(req)) return res.status(401).json({ error: 'Unauthorized' });
   saveRequests([]);
-  res.json({ message: 'All requests cleared', count: 0 });
+  res.json({ success: true });
 });
 
-// API: Export requests as JSON
 app.get('/api/export', (req, res) => {
-  if (!verifyToken(req)) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
-  const requests = loadRequests();
-  res.setHeader('Content-Disposition', 'attachment; filename="ssrf_hits.json"');
-  res.json(requests);
+  if (!verifyToken(req)) return res.status(401).json({ error: 'Unauthorized' });
+  res.download(dbFile, 'ssrf_hits.json');
 });
 
-// Catch-all endpoint - log all SSRF callbacks
+// Catch-all for SSRF callbacks
 app.all('*', (req, res) => {
   try {
-    // Extract IP address (with X-Forwarded-For support for proxies)
-    const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() ||
-               req.headers['x-real-ip'] ||
-               req.socket.remoteAddress ||
+    const ip = (req.headers['x-forwarded-for'] || '').split(',')[0] || 
+               req.headers['x-real-ip'] || 
+               req.socket.remoteAddress || 
                'unknown';
 
-    // Use raw body if available, otherwise try parsed body
     let body = req.rawBody || '';
-    if (!body && req.body) {
-      if (typeof req.body === 'string') {
-        body = req.body;
-      } else if (Buffer.isBuffer(req.body)) {
-        body = req.body.toString();
-      } else {
-        body = JSON.stringify(req.body);
-      }
-    }
 
-    // Log the request
     const newRequest = {
       id: uuidv4(),
       timestamp: new Date().toISOString(),
@@ -439,67 +203,35 @@ app.all('*', (req, res) => {
       userAgent: req.get('user-agent') || '',
       headers: req.headers,
       body: body.substring(0, 2000),
-      bodySize: body.length,
     };
 
     const requests = loadRequests();
     requests.push(newRequest);
     saveRequests(requests);
 
-    console.log(`✓ [${newRequest.timestamp}] ${req.method} ${req.path} from ${ip}`);
+    console.log(`✓ ${req.method} ${req.path} from ${ip}`);
 
-    // Respond with JSON
-    res.json({
-      received: true,
-      id: newRequest.id,
-      timestamp: newRequest.timestamp
-    });
+    res.json({ received: true, id: newRequest.id });
   } catch (err) {
-    console.error('❌ Error processing request:', err.message);
-    res.status(500).json({ error: 'Server error', message: err.message });
+    console.error('Error in catch-all:', err);
+    res.status(500).json({ error: err.message });
   }
-});
-
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error('❌ Unhandled error:', err);
-  res.status(500).json({ 
-    error: 'Internal server error', 
-    message: err.message 
-  });
 });
 
 // Start server
 const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n✅ SSRF Listener running on http://0.0.0.0:${PORT}`);
+  console.log(`\n✅ SSRF Listener started on port ${PORT}`);
   console.log(`📊 Dashboard: http://localhost:${PORT}/dashboard?token=${AUTH_TOKEN}`);
   console.log(`🏥 Health: http://localhost:${PORT}/health`);
-  console.log(`🎯 Listening for SSRF callbacks...\n`);
+  console.log(`🎯 Listening for callbacks...\n`);
 });
 
 server.on('error', (err) => {
-  console.error('❌ Server error:', err);
+  console.error('Server error:', err);
   process.exit(1);
 });
 
-// Graceful shutdown
 process.on('SIGTERM', () => {
-  console.log('\n📴 SIGTERM received, shutting down gracefully...');
-  server.close(() => {
-    console.log('✓ Server closed');
-    process.exit(0);
-  });
-});
-
-process.on('SIGINT', () => {
-  console.log('\n📴 SIGINT received, shutting down gracefully...');
-  server.close(() => {
-    console.log('✓ Server closed');
-    process.exit(0);
-  });
-});
-
-process.on('uncaughtException', (err) => {
-  console.error('❌ Uncaught exception:', err);
-  process.exit(1);
+  console.log('Shutting down...');
+  server.close(() => process.exit(0));
 });
