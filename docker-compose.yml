@@ -1,0 +1,12 @@
+version: '3.8'
+services:
+  ssrf-listener:
+    build: .
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - PORT=3000
+      - AUTH_TOKEN=${AUTH_TOKEN:-changeme}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
